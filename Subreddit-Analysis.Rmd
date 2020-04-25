@@ -1,0 +1,218 @@
+---
+title: "Subreddit-Analysis"
+author: "mutbi"
+date: "4/25/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+I love Reddit. I open it almost every day, every night. I honestly open it to see memes most of the time, but other than memes, you can find many other subreddits that aligned with your interest or hobbies. One of the subreddit that I subscribed to is r/dataisbeautiful. It is a subreddit to share data visualitations and many of them are interesting. I never post anything on this sub though, I'm just a lurker. 
+
+So, today I have a dataset that contains 173,611 unique posts that have been posted in r/dataisbeautiful. I got this data from this link (https://www.kaggle.com/unanimad/dataisbeautiful). And I'm interested to find out what kind of insight this dataset could offer, if any. 
+
+To start off, let's import the dataset to our R environment.
+
+```{r import data}
+reddit = read.csv('r_dataisbeautiful_posts.csv', header=T, sep=',')
+```
+
+Next, I will do data checking. Data checking process that I usually do is to check dataset summary, dataset's first 5 lines, checking null values, and checking outliers. 
+
+```{r data checking}
+library(dplyr)
+
+# - Quick Summary - #
+summary(reddit)
+```
+
+What I've noticed from this summary are:
+1. The IDs are unique, but the titles are not. 
+There are some titles that appear multiple times, like "data_irl" appears 1060 times, "Data_irl" appears 360 times, etc. So, I think those posts are not an Original Content [OC], probably they are some general posts that are posted by the subreddit's mod (like this: "Dataviz Open Discussion Thread for /r/dataisbeautiful") or they are sharable contents from Github (like "GitHub - gabrielbull/react-aim:"). 
+Because of this, I will check the data distribution from title frequency, finding the outlier and probably delete the outliers.
+
+2. total_awards_received column is mostly Null, so I'm not going to use that. 
+
+3. Same with awarders column, I'm not going to use it either. 
+
+4. Created_utc is still in integer format, I will change it to date time format.
+
+Move on...
+
+```{r data checking 2}
+#Check First 5 Rows
+head(reddit)
+
+#Change created_utc to datetime format
+reddit$created_utc = as.POSIXct.numeric(reddit$created_utc, origin = '1970-01-01 00:00:00')
+
+# Finding outliers
+duplicate_titles = reddit %>%
+  group_by(title)%>%
+  summarize(
+    count=n()
+  )
+
+table(as.factor(duplicate_titles$count)) ## 88% of titles have 1 count
+
+#checking data Distribution for titles's frequency
+boxplot(duplicate_titles$count)
+
+min(boxplot.stats(duplicate_titles$count)$out) ## titles that have count >=2 are outliers
+
+non_duplicate_titles = duplicate_titles$title[which(duplicate_titles$count==1)] # filter the titles that are not duplicates
+
+clean_reddit = reddit[which(reddit$title %in% non_duplicate_titles),] # clean dataset to only contains titles that have no duplicates
+
+summary(clean_reddit)
+
+```
+
+Okay. We've checked the summary, found the column with null values, saw the first 5 rows in the dataset, and removed the outliers.
+
+Before I move to Data Cleaning process, I usually start to list down the questions that I want to find out after saw what's inside of this data. So, here is the question I want to anwer:
+"Can we see a trending topic/subject from title from 2012 until 2020?".
+
+So, I will do two words extraction from the title. I know I will do tacky data cleaning to remove words that are not relevant, so bear with me ;) 
+
+```{r extracting two words}
+#### Extract Two Words ####
+# loading library 
+library(tidytext)
+library(tidyr)
+library(tm)
+library(data.table)
+library(stringr)
+library(lubridate)
+library(stopwords)
+library(zoo)
+
+# any sentence are full of stop words like ('a','of','the',etc), so I need to remove them because they're noises
+# loading stop words
+stop_words = data.frame(word=as.character(stopwords(language = 'en')))
+
+#change title's data type from factor to string
+clean_reddit$title = as.character(clean_reddit$title) 
+
+# extract two words from title
+twowords = clean_reddit%>%
+  unnest_tokens(word,title, token = "ngrams", n = 2)
+
+# separate bigrams with space to filter out stop words easier
+twowords <- twowords %>%
+  separate(word, c("word1", "word2"), sep = " ")
+
+# filter our stopwords
+twowords <- twowords %>%
+  filter(!word1 %in% stop_words$word & !word2 %in% stop_words$word)
+
+#remove 'oc' (tag for original content)
+twowords = twowords[which(twowords$word1 != 'oc' & twowords$word2 != 'oc' ),] 
+
+# add new column to extract month and year from created_utc
+twowords$month = format(as.Date(twowords$created_utc), "%Y-%m")
+
+#change month data type from char to yearmonth
+twowords$month = as.yearmon(twowords$month)
+
+# add new column to extract year from created_utc
+twowords$year = year(twowords$created_utc)
+
+# combine word1 and word2 back
+twowords$words = paste(twowords$word1,twowords$word2)
+twowords$word1 = NULL
+twowords$word2 = NULL
+
+# count frequency of words and filter stop words
+twowords_freq <- twowords %>%
+  group_by(month ,words)%>%
+  summarize(
+    freq = n()
+  )
+
+# see the first 5 rows
+head(twowords)
+
+```
+
+After looking into twowords_freq, I see that many top mentioned words are like 'top 10', 'top 15', 'top 20', etc. Because it doesn't tell me anything, I will remove these type of words. 
+
+```{r filter words}
+twowords_freq = twowords_freq%>%
+  filter(!words %like% c('top'))
+```
+
+Before moving to data visualisation, I think the chart/plot will look messy if I put all words into the chart. Hence, I want to keep it simple by only showing the number 1 trending words per month.
+
+Below is the code to add rank column and show data visualisation. I'm getting lazier as this post getting longer, so I will write everything in the comments.
+
+```{r create plot}
+# add new column as rank 
+twowords_freq <- twowords_freq %>%
+  group_by(month)%>%
+  arrange(desc(freq))%>%
+  mutate(
+    rank = row_number()
+  )
+
+# data visualisation
+library(ggplot2)
+library(plotly)
+
+plot = twowords_freq%>%
+  filter(rank == 1)%>%
+  ggplot(aes(x=month, y=freq, color=words))+
+  geom_segment( aes(x=month, xend=month, y=0, yend=freq), color="grey", stat='identity') +
+  geom_point(size=2)+
+  xlab('Month-Year')+
+  ggtitle("Most Frequent Words Mentioned on r/dataisbeautiful's Posts in 2012-2020")+
+  theme(
+    plot.title = element_text(size=10),
+    legend.position = "none"
+  )
+
+ggplotly(plot)
+```
+
+So, from the plot we see a high number of titles that mentioned Covid 19 in March and April 2020. It surpasses all other top subjects/words all time. 
+
+However it's kinda hard to see other trending topics over time because Covid 19 posts are so high in March and April 2020, it made other words looks too small for us to see. So, I will filter out March and April 2020's data just to see the other trending topics over time clearer. 
+
+```{r create plot 2}
+plot_filtered = twowords_freq%>%
+  filter(rank == 1, !month %in% c(as.yearmon('Mar 2020'),as.yearmon('Apr 2020')))%>%
+  ggplot(aes(x=month, y=freq, color=words))+
+  geom_segment( aes(x=month, xend=month, y=0, yend=freq), color="grey", stat='identity') +
+  geom_point(size=2)+
+  xlab('Month-Year')+
+  ggtitle("Most Frequent Words Mentioned on r/dataisbeautiful's Posts in 2012-2020")+
+  theme(
+    plot.title = element_text(size=10),
+    legend.position = "none"
+  )
+
+ggplotly(plot_filtered)
+```
+
+These top mentioned words reflect what's trending in the world in a particular time. 
+For example: 
+World cup in Jun 2014, 
+Jun 2018 and July 2017, 
+Superbowl every February, 
+Election Result in Nov 2016, 
+Pokemon Go in July 2016, 
+Net Neutrality in Nov 2017, 
+Covid 19 in Feb 2020, 
+and so on.  
+
+I think my goal is pretty much achieved, even though there are some improvements that I'm thinking about. Like how to show all the words - not only the most mentioned words per month - and how to visualize it interactively to the chart. But I guess, it'll be for later....
+
+Other questions that can be answered from this dataset are:
+1. Top posts with most upvote/score.
+2. Top posts with most comments.
+3. Top posters.
+etc.. 
+
+I will continue this analysis if I have time and more motivation to do it. 
